@@ -4,6 +4,7 @@ import { decodeMonadTransaction } from "../services/monadAgentDecoder";
 import { buildAgentTrustProfile } from "../services/agentTrustEngine";
 import { analyzeCryptoPortfolio } from "../services/agentCryptoIntelligence";
 import { analyzeParallaxMarkets } from "../services/parallaxMarketIntelligence";
+import { buildCoordinationPlan } from "../services/mcpCoordinationEngine";
 
 const router: IRouter = Router();
 
@@ -63,6 +64,35 @@ const parallaxMarketSchema = z.object({
     maximumOracleAgeSeconds: z.number().int().positive(),
     allowedMarketTypes: z.array(z.enum(["spot", "perpetual", "lending", "staking", "prediction", "rwa", "fx", "commodity", "index"])).min(1),
     requireHumanApprovalAboveUsd: z.number().nonnegative(),
+  }),
+});
+
+const mcpCoordinationSchema = z.object({
+  objective: z.string().min(3).max(2_000),
+  requiredCapabilities: z.array(z.string().min(1).max(128)).min(1).max(64),
+  agents: z.array(z.object({
+    agentId: z.string().min(1).max(128),
+    namespace: z.string().min(1).max(128),
+    cardVersion: z.number().int().positive(),
+    capabilities: z.array(z.string().min(1).max(128)).max(256),
+    trustScore: z.number().min(0).max(100),
+    online: z.boolean(),
+  })).min(1).max(256),
+  tools: z.array(z.object({
+    serverId: z.string().min(1).max(128),
+    toolName: z.string().min(1).max(128),
+    capability: z.string().min(1).max(128),
+    riskTier: z.enum(["observe", "simulate", "prepare", "execute", "critical"]),
+    requiresSandbox: z.boolean(),
+    requiresHumanApproval: z.boolean(),
+    enabled: z.boolean(),
+  })).min(1).max(2_000),
+  policy: z.object({
+    minimumTrustScore: z.number().min(0).max(100),
+    allowExecution: z.boolean(),
+    allowCritical: z.boolean(),
+    requireSandboxForExecution: z.boolean(),
+    maximumAgents: z.number().int().positive().max(256),
   }),
 });
 
@@ -129,6 +159,25 @@ router.post("/parallax/market-intelligence", (req: Request, res: Response) => {
     intelligence,
     product: "PARALLAX Ethereum Market Intelligence",
     notice: "Opportunities are analytical outputs, not investment advice or executed trades.",
+  });
+});
+
+router.post("/mcp/coordination-plan", (req: Request, res: Response) => {
+  const parsed = mcpCoordinationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "Invalid MCP coordination inputs", issues: parsed.error.issues });
+  }
+
+  const plan = buildCoordinationPlan(parsed.data);
+  return res.status(200).json({
+    ok: true,
+    plan,
+    executionBoundary: {
+      toolsInvoked: false,
+      transactionsSigned: false,
+      externalStateChanged: false,
+      reason: "This endpoint produces a deterministic governed coordination plan. A bridge runtime must enforce policy, sandboxing, authentication, and approval before invocation.",
+    },
   });
 });
 
