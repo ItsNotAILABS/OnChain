@@ -3,6 +3,7 @@ import { z } from "zod";
 import { decodeMonadTransaction } from "../services/monadAgentDecoder";
 import { buildAgentTrustProfile } from "../services/agentTrustEngine";
 import { analyzeCryptoPortfolio } from "../services/agentCryptoIntelligence";
+import { analyzeParallaxMarkets } from "../services/parallaxMarketIntelligence";
 
 const router: IRouter = Router();
 
@@ -38,6 +39,31 @@ const cryptoIntelligenceSchema = z.object({
   maxSingleAssetBps: z.number().int().min(1).max(10_000),
   minimumStableReserveBps: z.number().int().min(0).max(10_000),
   minimumLiquidityUsd: z.number().nonnegative(),
+});
+
+const parallaxMarketSchema = z.object({
+  markets: z.array(z.object({
+    venue: z.string().min(1).max(128),
+    chainId: z.string().min(1).max(64),
+    marketType: z.enum(["spot", "perpetual", "lending", "staking", "prediction", "rwa", "fx", "commodity", "index"]),
+    symbol: z.string().min(1).max(64),
+    price: z.number().positive(),
+    liquidityUsd: z.number().nonnegative(),
+    volume24hUsd: z.number().nonnegative(),
+    fundingRateBps: z.number().optional(),
+    borrowRateBps: z.number().optional(),
+    volatilityBps: z.number().nonnegative().optional(),
+    oracleAgeSeconds: z.number().int().nonnegative().optional(),
+    confidenceBps: z.number().int().min(0).max(10_000).optional(),
+  })).min(2).max(2_000),
+  policy: z.object({
+    maximumNotionalUsd: z.number().positive(),
+    maximumSlippageBps: z.number().int().min(1).max(5_000),
+    minimumLiquidityUsd: z.number().nonnegative(),
+    maximumOracleAgeSeconds: z.number().int().positive(),
+    allowedMarketTypes: z.array(z.enum(["spot", "perpetual", "lending", "staking", "prediction", "rwa", "fx", "commodity", "index"])).min(1),
+    requireHumanApprovalAboveUsd: z.number().nonnegative(),
+  }),
 });
 
 router.post("/decode-transaction", async (req: Request, res: Response) => {
@@ -88,6 +114,21 @@ router.post("/crypto-intelligence", (req: Request, res: Response) => {
       transactionBroadcast: false,
       reason: "The intelligence layer proposes governed actions only. A wallet or smart account must independently simulate and authorize execution.",
     },
+  });
+});
+
+router.post("/parallax/market-intelligence", (req: Request, res: Response) => {
+  const parsed = parallaxMarketSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "Invalid PARALLAX market inputs", issues: parsed.error.issues });
+  }
+
+  const intelligence = analyzeParallaxMarkets(parsed.data.markets, parsed.data.policy);
+  return res.status(200).json({
+    ok: true,
+    intelligence,
+    product: "PARALLAX Ethereum Market Intelligence",
+    notice: "Opportunities are analytical outputs, not investment advice or executed trades.",
   });
 });
 
