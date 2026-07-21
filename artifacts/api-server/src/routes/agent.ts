@@ -5,12 +5,15 @@ import { buildAgentTrustProfile } from "../services/agentTrustEngine";
 import { analyzeCryptoPortfolio } from "../services/agentCryptoIntelligence";
 import { analyzeParallaxMarkets } from "../services/parallaxMarketIntelligence";
 import { coordinateMcpTask } from "../services/parallaxMcpCoordination";
+import { evaluateMcpSecurityBoundary } from "../services/mcpSecurityBoundary";
 
 const router: IRouter = Router();
 
-const decodeSchema = z.object({
-  transactionHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/, "transactionHash must be a 32-byte hex value"),
-});
+const hashSchema = z.string().regex(/^0x[0-9a-fA-F]{64}$/);
+const riskSchema = z.enum(["observe", "simulate", "prepare", "execute", "critical"]);
+const approvalSchema = z.enum(["none", "human", "multisig", "hardware", "custody-policy"]);
+
+const decodeSchema = z.object({ transactionHash: hashSchema });
 
 const trustProfileSchema = z.object({
   cardVersion: z.number().int().positive(),
@@ -75,7 +78,7 @@ const mcpCoordinationSchema = z.object({
     targetChain: z.string().min(1).max(64).optional(),
     estimatedValueUsd: z.number().nonnegative().optional(),
     dependencies: z.array(z.string().min(1).max(128)).max(128).optional(),
-    evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    evidenceHash: hashSchema,
   }),
   agents: z.array(z.object({
     agentId: z.string().min(1).max(128),
@@ -89,9 +92,9 @@ const mcpCoordinationSchema = z.object({
     serverId: z.string().min(1).max(128),
     description: z.string().min(1).max(1_000),
     transport: z.enum(["stdio", "sse", "streamable-http", "websocket", "local-http"]),
-    riskTier: z.enum(["observe", "simulate", "prepare", "execute", "critical"]),
-    inputSchemaHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
-    outputSchemaHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    riskTier: riskSchema,
+    inputSchemaHash: hashSchema,
+    outputSchemaHash: hashSchema,
     timeoutMs: z.number().int().positive().max(3_600_000),
     requiresSandbox: z.boolean(),
     requiresHumanApproval: z.boolean(),
@@ -107,19 +110,58 @@ const mcpCoordinationSchema = z.object({
   }),
 });
 
+const mcpSecuritySchema = z.object({
+  session: z.object({
+    sessionId: z.string().min(8).max(256),
+    agentId: z.string().min(1).max(128),
+    agentCardVersion: z.number().int().positive(),
+    issuedAt: z.number().int().nonnegative(),
+    expiresAt: z.number().int().positive(),
+    capabilities: z.array(z.string().min(1).max(128)).max(256),
+    nonce: z.string().min(16).max(256),
+    signatureVerified: z.boolean(),
+  }),
+  request: z.object({
+    requestId: z.string().min(1).max(128),
+    serverId: z.string().min(1).max(128),
+    toolName: z.string().min(1).max(128),
+    capability: z.string().min(1).max(128),
+    riskTier: riskSchema,
+    targetChain: z.string().min(1).max(64).optional(),
+    estimatedValueUsd: z.number().nonnegative().optional(),
+    inputSchemaHash: hashSchema,
+    outputSchemaHash: hashSchema,
+    intentNonce: z.string().min(16).max(256),
+    deadline: z.number().int().positive(),
+    containsSecrets: z.boolean().optional(),
+    sandboxRequested: z.boolean().optional(),
+    approvalMode: approvalSchema,
+  }),
+  policy: z.object({
+    allowedServers: z.array(z.string().min(1).max(128)).max(512),
+    allowedTools: z.array(z.string().min(3).max(257)).max(4_000),
+    allowedCapabilities: z.array(z.string().min(1).max(128)).max(512),
+    allowedChains: z.array(z.string().min(1).max(64)).max(128),
+    maximumTransactionValueUsd: z.number().nonnegative(),
+    maximumRequestsPerMinute: z.number().int().positive().max(100_000),
+    requireSandboxFor: z.array(riskSchema).max(5),
+    minimumApprovalByRisk: z.record(riskSchema, z.array(approvalSchema).min(1).max(5)).partial(),
+    trustedInputSchemaHashes: z.array(hashSchema).max(4_000),
+    trustedOutputSchemaHashes: z.array(hashSchema).max(4_000),
+    consumedNonces: z.array(z.string().min(16).max(256)).max(100_000),
+    recentRequestTimestamps: z.array(z.number().int().nonnegative()).max(100_000),
+  }),
+  now: z.number().int().nonnegative().optional(),
+});
+
 router.post("/decode-transaction", async (req: Request, res: Response) => {
   const parsed = decodeSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "Invalid Monad transaction hash", issues: parsed.error.issues });
-  }
-
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid Monad transaction hash", issues: parsed.error.issues });
   try {
     const decoded = await decodeMonadTransaction(parsed.data.transactionHash);
     return res.status(200).json({ ok: true, decoded });
   } catch (error) {
-    const status = typeof error === "object" && error && "status" in error
-      ? Number((error as { status: unknown }).status)
-      : 502;
+    const status = typeof error === "object" && error && "status" in error ? Number((error as { status: unknown }).status) : 502;
     const message = error instanceof Error ? error.message : "Monad transaction decoding failed";
     return res.status(Number.isInteger(status) ? status : 502).json({ ok: false, error: message });
   }
@@ -127,67 +169,40 @@ router.post("/decode-transaction", async (req: Request, res: Response) => {
 
 router.post("/trust-profile", (req: Request, res: Response) => {
   const parsed = trustProfileSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "Invalid agent trust inputs", issues: parsed.error.issues });
-  }
-
-  const profile = buildAgentTrustProfile(parsed.data);
-  return res.status(200).json({
-    ok: true,
-    profile,
-    notice: "This deterministic procurement profile is a policy aid, not a transferable reputation token or financial guarantee.",
-  });
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid agent trust inputs", issues: parsed.error.issues });
+  return res.status(200).json({ ok: true, profile: buildAgentTrustProfile(parsed.data), notice: "This deterministic procurement profile is a policy aid, not a transferable reputation token or financial guarantee." });
 });
 
 router.post("/crypto-intelligence", (req: Request, res: Response) => {
   const parsed = cryptoIntelligenceSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "Invalid crypto intelligence inputs", issues: parsed.error.issues });
-  }
-
-  const intelligence = analyzeCryptoPortfolio(parsed.data);
-  return res.status(200).json({
-    ok: true,
-    intelligence,
-    executionBoundary: {
-      transactionCreated: false,
-      transactionSigned: false,
-      transactionBroadcast: false,
-      reason: "The intelligence layer proposes governed actions only. A wallet or smart account must independently simulate and authorize execution.",
-    },
-  });
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid crypto intelligence inputs", issues: parsed.error.issues });
+  return res.status(200).json({ ok: true, intelligence: analyzeCryptoPortfolio(parsed.data), executionBoundary: { transactionCreated: false, transactionSigned: false, transactionBroadcast: false, reason: "The intelligence layer proposes governed actions only. A wallet or smart account must independently simulate and authorize execution." } });
 });
 
 router.post("/parallax/market-intelligence", (req: Request, res: Response) => {
   const parsed = parallaxMarketSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "Invalid PARALLAX market inputs", issues: parsed.error.issues });
-  }
-
-  const intelligence = analyzeParallaxMarkets(parsed.data.markets, parsed.data.policy);
-  return res.status(200).json({
-    ok: true,
-    intelligence,
-    product: "PARALLAX Ethereum Market Intelligence",
-    notice: "Opportunities are analytical outputs, not investment advice or executed trades.",
-  });
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid PARALLAX market inputs", issues: parsed.error.issues });
+  return res.status(200).json({ ok: true, intelligence: analyzeParallaxMarkets(parsed.data.markets, parsed.data.policy), product: "PARALLAX Ethereum Market Intelligence", notice: "Opportunities are analytical outputs, not investment advice or executed trades." });
 });
 
 router.post("/mcp/coordination-plan", (req: Request, res: Response) => {
   const parsed = mcpCoordinationSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "Invalid MCP coordination inputs", issues: parsed.error.issues });
-  }
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid MCP coordination inputs", issues: parsed.error.issues });
+  return res.status(200).json({ ok: true, decision: coordinateMcpTask(parsed.data.task, parsed.data.agents, parsed.data.tools, parsed.data.policy), executionBoundary: { toolsInvoked: false, transactionsSigned: false, externalStateChanged: false, reason: "This endpoint produces a deterministic governed coordination decision. A bridge runtime must enforce authentication, sandboxing, approval, and receipt capture before invocation." } });
+});
 
-  const decision = coordinateMcpTask(parsed.data.task, parsed.data.agents, parsed.data.tools, parsed.data.policy);
-  return res.status(200).json({
-    ok: true,
+router.post("/mcp/security-decision", (req: Request, res: Response) => {
+  const parsed = mcpSecuritySchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false, error: "Invalid MCP security boundary inputs", issues: parsed.error.issues });
+  const decision = evaluateMcpSecurityBoundary(parsed.data.session, parsed.data.request, parsed.data.policy, parsed.data.now);
+  return res.status(decision.allowed ? 200 : 403).json({
+    ok: decision.allowed,
     decision,
-    executionBoundary: {
-      toolsInvoked: false,
+    signingBoundary: {
+      privateKeysAccepted: false,
       transactionsSigned: false,
-      externalStateChanged: false,
-      reason: "This endpoint produces a deterministic governed coordination decision. A bridge runtime must enforce authentication, sandboxing, approval, and receipt capture before invocation.",
+      custodyPerformed: false,
+      reason: "Financial signing remains isolated in a wallet, smart account, hardware signer, multisig, or governed custody layer.",
     },
   });
 });
