@@ -4,7 +4,7 @@ import { decodeMonadTransaction } from "../services/monadAgentDecoder";
 import { buildAgentTrustProfile } from "../services/agentTrustEngine";
 import { analyzeCryptoPortfolio } from "../services/agentCryptoIntelligence";
 import { analyzeParallaxMarkets } from "../services/parallaxMarketIntelligence";
-import { buildCoordinationPlan } from "../services/mcpCoordinationEngine";
+import { coordinateMcpTask } from "../services/parallaxMcpCoordination";
 
 const router: IRouter = Router();
 
@@ -68,31 +68,42 @@ const parallaxMarketSchema = z.object({
 });
 
 const mcpCoordinationSchema = z.object({
-  objective: z.string().min(3).max(2_000),
-  requiredCapabilities: z.array(z.string().min(1).max(128)).min(1).max(64),
+  task: z.object({
+    taskId: z.string().min(1).max(128),
+    objective: z.string().min(3).max(2_000),
+    requestedCapability: z.string().min(1).max(128),
+    targetChain: z.string().min(1).max(64).optional(),
+    estimatedValueUsd: z.number().nonnegative().optional(),
+    dependencies: z.array(z.string().min(1).max(128)).max(128).optional(),
+    evidenceHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+  }),
   agents: z.array(z.object({
     agentId: z.string().min(1).max(128),
-    namespace: z.string().min(1).max(128),
     cardVersion: z.number().int().positive(),
     capabilities: z.array(z.string().min(1).max(128)).max(256),
     trustScore: z.number().min(0).max(100),
-    online: z.boolean(),
+    runtimeReachable: z.boolean(),
   })).min(1).max(256),
   tools: z.array(z.object({
+    namespace: z.string().min(1).max(128),
     serverId: z.string().min(1).max(128),
-    toolName: z.string().min(1).max(128),
-    capability: z.string().min(1).max(128),
+    description: z.string().min(1).max(1_000),
+    transport: z.enum(["stdio", "sse", "streamable-http", "websocket", "local-http"]),
     riskTier: z.enum(["observe", "simulate", "prepare", "execute", "critical"]),
+    inputSchemaHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    outputSchemaHash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+    timeoutMs: z.number().int().positive().max(3_600_000),
     requiresSandbox: z.boolean(),
     requiresHumanApproval: z.boolean(),
-    enabled: z.boolean(),
+    allowedChains: z.array(z.string().min(1).max(64)).max(64).optional(),
+    maximumValueUsd: z.number().nonnegative().optional(),
   })).min(1).max(2_000),
   policy: z.object({
     minimumTrustScore: z.number().min(0).max(100),
-    allowExecution: z.boolean(),
-    allowCritical: z.boolean(),
-    requireSandboxForExecution: z.boolean(),
-    maximumAgents: z.number().int().positive().max(256),
+    maximumExecutionValueUsd: z.number().nonnegative(),
+    allowCriticalTools: z.boolean(),
+    requireHumanApprovalForExecution: z.boolean(),
+    maximumParallelTasks: z.number().int().positive().max(256),
   }),
 });
 
@@ -168,15 +179,15 @@ router.post("/mcp/coordination-plan", (req: Request, res: Response) => {
     return res.status(400).json({ ok: false, error: "Invalid MCP coordination inputs", issues: parsed.error.issues });
   }
 
-  const plan = buildCoordinationPlan(parsed.data);
+  const decision = coordinateMcpTask(parsed.data.task, parsed.data.agents, parsed.data.tools, parsed.data.policy);
   return res.status(200).json({
     ok: true,
-    plan,
+    decision,
     executionBoundary: {
       toolsInvoked: false,
       transactionsSigned: false,
       externalStateChanged: false,
-      reason: "This endpoint produces a deterministic governed coordination plan. A bridge runtime must enforce policy, sandboxing, authentication, and approval before invocation.",
+      reason: "This endpoint produces a deterministic governed coordination decision. A bridge runtime must enforce authentication, sandboxing, approval, and receipt capture before invocation.",
     },
   });
 });
