@@ -9,6 +9,7 @@ import proxyRouter from "./proxy";
 import walletsRouter from "./wallets";
 import { authRouter } from "./auth";
 import agentRouter from "./agent";
+import dappTemplatesRouter from "./dappTemplates";
 
 const router: IRouter = Router();
 
@@ -20,6 +21,7 @@ router.use(workspaceRouter);
 router.use("/ai", aiRouter);
 router.use("/chain", chainRouter);
 router.use("/agent", agentRouter);
+router.use("/dapp", dappTemplatesRouter);
 router.use(proxyRouter);
 router.use(walletsRouter);
 router.use("/auth", authRouter);
