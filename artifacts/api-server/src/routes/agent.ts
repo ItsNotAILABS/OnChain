@@ -2,6 +2,7 @@ import { Router, type IRouter, type Request, type Response } from "express";
 import { z } from "zod";
 import { decodeMonadTransaction } from "../services/monadAgentDecoder";
 import { buildAgentTrustProfile } from "../services/agentTrustEngine";
+import { analyzeCryptoPortfolio } from "../services/agentCryptoIntelligence";
 
 const router: IRouter = Router();
 
@@ -23,14 +24,26 @@ const trustProfileSchema = z.object({
   latestEvidenceAgeSeconds: z.number().int().nonnegative().optional(),
 });
 
+const cryptoIntelligenceSchema = z.object({
+  positions: z.array(z.object({
+    chainId: z.string().min(1),
+    symbol: z.string().min(1).max(32),
+    tokenAddress: z.string().optional(),
+    balance: z.string().regex(/^\d+(\.\d+)?$/, "balance must be a non-negative decimal string"),
+    priceUsd: z.number().nonnegative(),
+    volatilityBps: z.number().int().nonnegative().optional(),
+    liquidityUsd: z.number().nonnegative().optional(),
+  })).max(500),
+  stableSymbols: z.array(z.string().min(1).max(32)).max(50).optional(),
+  maxSingleAssetBps: z.number().int().min(1).max(10_000),
+  minimumStableReserveBps: z.number().int().min(0).max(10_000),
+  minimumLiquidityUsd: z.number().nonnegative(),
+});
+
 router.post("/decode-transaction", async (req: Request, res: Response) => {
   const parsed = decodeSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid Monad transaction hash",
-      issues: parsed.error.issues,
-    });
+    return res.status(400).json({ ok: false, error: "Invalid Monad transaction hash", issues: parsed.error.issues });
   }
 
   try {
@@ -48,11 +61,7 @@ router.post("/decode-transaction", async (req: Request, res: Response) => {
 router.post("/trust-profile", (req: Request, res: Response) => {
   const parsed = trustProfileSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({
-      ok: false,
-      error: "Invalid agent trust inputs",
-      issues: parsed.error.issues,
-    });
+    return res.status(400).json({ ok: false, error: "Invalid agent trust inputs", issues: parsed.error.issues });
   }
 
   const profile = buildAgentTrustProfile(parsed.data);
@@ -60,6 +69,25 @@ router.post("/trust-profile", (req: Request, res: Response) => {
     ok: true,
     profile,
     notice: "This deterministic procurement profile is a policy aid, not a transferable reputation token or financial guarantee.",
+  });
+});
+
+router.post("/crypto-intelligence", (req: Request, res: Response) => {
+  const parsed = cryptoIntelligenceSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "Invalid crypto intelligence inputs", issues: parsed.error.issues });
+  }
+
+  const intelligence = analyzeCryptoPortfolio(parsed.data);
+  return res.status(200).json({
+    ok: true,
+    intelligence,
+    executionBoundary: {
+      transactionCreated: false,
+      transactionSigned: false,
+      transactionBroadcast: false,
+      reason: "The intelligence layer proposes governed actions only. A wallet or smart account must independently simulate and authorize execution.",
+    },
   });
 });
 
