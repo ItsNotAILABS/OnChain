@@ -1,0 +1,15 @@
+{
+  "canisters": {
+    "agent_passport": {
+      "type": "motoko",
+      "main": "icp/agent_passport/main.mo",
+      "candid": "icp/agent_passport/agent_passport.did"
+    }
+  },
+  "defaults": {
+    "build": {
+      "packtool": ""
+    }
+  },
+  "version": 1
+}
