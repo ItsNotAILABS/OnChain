@@ -1,0 +1,60 @@
+type ChainRef = record {
+  namespace : text;
+  reference : text;
+};
+
+type CommitmentSet = record {
+  identity : blob;
+  doctrine : blob;
+  capability : blob;
+  runtime : blob;
+};
+
+type Passport = record {
+  id : nat;
+  owner : principal;
+  agentPrincipal : principal;
+  version : nat;
+  issuedAt : nat64;
+  commitments : CommitmentSet;
+  metadataUri : text;
+  monadCard : opt ChainRef;
+  monadCredential : opt ChainRef;
+  active : bool;
+};
+
+type PassportInput = record {
+  agentPrincipal : principal;
+  version : nat;
+  commitments : CommitmentSet;
+  metadataUri : text;
+  monadCard : opt ChainRef;
+  monadCredential : opt ChainRef;
+};
+
+type EvidenceAnchor = record {
+  id : nat;
+  passportId : nat;
+  submittedBy : principal;
+  sourceChain : ChainRef;
+  eventType : text;
+  transactionHash : text;
+  blockNumber : opt nat;
+  evidenceHash : blob;
+  metadataUri : opt text;
+  observedAt : nat64;
+};
+
+type Result<T> = variant { ok : T; err : text };
+
+service : {
+  mintPassport : (PassportInput) -> (Result<Passport>);
+  deactivatePassport : (nat) -> (Result<Passport>);
+  anchorEvidence : (nat, ChainRef, text, text, opt nat, blob, opt text) -> (Result<EvidenceAnchor>);
+  getPassport : query (nat) -> (opt Passport);
+  getActivePassport : query (principal) -> (opt Passport);
+  listPassportHistory : query (principal) -> (vec Passport);
+  listEvidence : query (nat) -> (vec EvidenceAnchor);
+  verifyCommitments : query (nat, CommitmentSet) -> (bool);
+  stats : query () -> (record { passports : nat; evidenceAnchors : nat; agents : nat });
+}
